@@ -23,7 +23,7 @@
            [java.util HashMap Map]
            [java.io ByteArrayInputStream]))
 
-(set! *warn-on-reflection* true)
+(comment (set! *warn-on-reflection* true))
 
 (defn dynamodb-client
   "Creates a new DynamoDB client using the provided options, with explicit credential handling."
