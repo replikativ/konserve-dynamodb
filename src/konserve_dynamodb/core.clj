@@ -210,7 +210,7 @@
                         (map #(.s (.get % "Key")))
                         doall))))))
 
-(defn connect-dynamodb-store [dynamodb-spec & {:keys [opts]
+(defn connect-store [dynamodb-spec & {:keys [opts]
                                       :as params}]
   (let [complete-opts (merge {:sync? true :read-capacity 50 :write-capacity 50} opts)
         client (dynamodb-client dynamodb-spec)
@@ -251,7 +251,7 @@
                       :secret (System/getenv "AWS_SECRET_ACCESS_KEY")})
 
   ;; Connect to the store
-  (def store (<!! (connect-dynamodb-store dynamodb-spec :opts {:sync? false})))
+  (def store (<!! (connect-store dynamodb-spec :opts {:sync? false})))
 
   ;; Test inserting and retrieving data
   (time (<!! (k/assoc-in store ["foo"] {:foo "baz"} {:sync? false})))

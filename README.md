@@ -14,7 +14,7 @@ For asynchronous execution take a look at the [konserve example](https://github.
 
 
 ``` clojure
-(require '[konserve-dynamodb.core :refer [connect-dynamodb-store]]
+(require '[konserve-dynamodb.core :refer [connect-store]]
          '[konserve.core :as k])
 
 (def dynamodb-spec
@@ -22,7 +22,7 @@ For asynchronous execution take a look at the [konserve example](https://github.
    :table  "konserve-demo"
    })
 
-(def store (connect-dynamodb-store dynamodb-spec :opts {:sync? true}))
+(def store (connect-store dynamodb-spec :opts {:sync? true}))
 
 (k/assoc-in store ["foo" :bar] {:foo "baz"} {:sync? true})
 (k/get-in store ["foo"] nil {:sync? true})
