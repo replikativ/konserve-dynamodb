@@ -6,7 +6,7 @@
             [superv.async :refer [go-try-]]
             [taoensso.timbre :refer [info trace]])
   (:import [software.amazon.awssdk.services.dynamodb DynamoDbClient]
-           [software.amazon.awssdk.services.dynamodb.model 
+           [software.amazon.awssdk.services.dynamodb.model
             PutItemRequest PutItemResponse
             GetItemRequest
             DeleteItemRequest DeleteItemResponse
@@ -85,7 +85,7 @@
                                 (.tableName table-name)
                                 (.key key)
                                 (.build))))
-    (catch Exception _ 
+    (catch Exception _
       nil)))
 
 (defn ^DeleteItemResponse delete-item [^DynamoDbClient client ^String table-name ^HashMap key]
@@ -238,7 +238,6 @@
   (async+sync (:sync? env) *default-sync-translation*
               (go-try- (.close (:client (:backing store))))))
 
-
 (comment
   ;; Testing and usage example:
   (require '[konserve.core :as k]
@@ -277,6 +276,4 @@
   ;; Release the store connection
   (release store {:sync? true})
 
-  (delete-store dynamodb-spec :opts {:sync? true})
-
-  )
+  (delete-store dynamodb-spec :opts {:sync? true}))
