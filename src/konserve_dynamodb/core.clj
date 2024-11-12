@@ -21,6 +21,7 @@
            [software.amazon.awssdk.auth.credentials StaticCredentialsProvider AwsBasicCredentials]
            [software.amazon.awssdk.core SdkBytes]
            [java.util HashMap Map]
+           [java.net URI]
            [java.io ByteArrayInputStream]))
 
 (comment (set! *warn-on-reflection* true))
@@ -29,6 +30,8 @@
   "Creates a new DynamoDB client using the provided options, with explicit credential handling."
   [opts]
   (let [builder (DynamoDbClient/builder)]
+    (when (:endpoint opts)
+      (.endpointOverride builder (URI/create (:endpoint opts))))
     (when (:region opts)
       (.region builder (software.amazon.awssdk.regions.Region/of (:region opts))))
     (when (:access-key opts)
