@@ -64,43 +64,43 @@
 
 (defn table-exists? [^DynamoDbClient client ^String table-name]
   (try
-    (.describeTable client (-> (DescribeTableRequest/builder)
-                               (.tableName table-name)
-                               .build))
+    (.describeTable ^DynamoDbClient client ^DescribeTableRequest (-> (DescribeTableRequest/builder)
+                                                                 (.tableName table-name)
+                                                                 .build))
     true
     (catch ResourceNotFoundException _
       false)))
 
 (defn delete-dynamodb-table [^DynamoDbClient client ^String table-name]
-  (.deleteTable client (-> (DeleteTableRequest/builder)
-                           (.tableName table-name)
-                           .build)))
+  (.deleteTable ^DynamoDbClient client ^DeleteTableRequest (-> (DeleteTableRequest/builder)
+                                                           (.tableName table-name)
+                                                           .build)))
 
 (defn ^PutItemResponse put-item [^DynamoDbClient client ^String table-name ^HashMap item]
-  (.putItem client (-> (PutItemRequest/builder)
-                       (.tableName table-name)
-                       (.item item)
-                       (.build))))
+  (.putItem ^DynamoDbClient client ^PutItemRequest (-> (PutItemRequest/builder)
+                                                   (.tableName table-name)
+                                                   (.item item)
+                                                   .build)))
 
 (defn ^Map get-item [^DynamoDbClient client ^String table-name ^HashMap key]
   (try
-    (.item (.getItem client (-> (GetItemRequest/builder)
-                                (.tableName table-name)
-                                (.key key)
-                                (.build))))
+    (.item (.getItem ^DynamoDbClient client ^GetItemRequest (-> (GetItemRequest/builder)
+                                                            (.tableName table-name)
+                                                            (.key key)
+                                                            .build)))
     (catch Exception _
       nil)))
 
 (defn ^DeleteItemResponse delete-item [^DynamoDbClient client ^String table-name ^HashMap key]
-  (.deleteItem client (-> (DeleteItemRequest/builder)
-                          (.tableName table-name)
-                          (.key key)
-                          (.build))))
+  (.deleteItem ^DynamoDbClient client ^DeleteItemRequest (-> (DeleteItemRequest/builder)
+                                                             (.tableName table-name)
+                                                             (.key key)
+                                                             .build)))
 
 (defn ^ScanResponse scan-table [^DynamoDbClient client ^String table-name]
-  (.scan client (-> (ScanRequest/builder)
-                    (.tableName table-name)
-                    (.build))))
+  (.scan ^DynamoDbClient client ^ScanRequest (-> (ScanRequest/builder)
+                                                 (.tableName table-name)
+                                                 .build)))
 
 (defrecord DynamoDBBlob [^DynamoDbClient table ^String key data fetched-object]
   PBackingBlob
