@@ -142,7 +142,7 @@
                                       (.tableName table-name)
                                       (.key key)
                                       .build)]
-      (.item (.getItem client request)))
+      (into {} (.item (.getItem client request))))
     (catch Exception _
       nil)))
 
