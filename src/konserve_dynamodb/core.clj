@@ -134,7 +134,7 @@
     (let [^GetItemRequest request (-> (GetItemRequest/builder)
                                       (.tableName table-name)
                                       (.key key)
-                                      (.consistentRead consistent-read)
+                                      (.consistentRead consistent-read?)
                                       .build)]
       (into {} (.item (.getItem client request))))
     (catch Exception _
@@ -200,11 +200,11 @@
                                                     (:table table)
                                                     (hash-map "Key" (attribute-value-s key))
                                                     (:consistent-read? table)))
-                 (let [^Map fetched-obj @fetched-object
-                       ^AttributeValue attr-value (.get fetched-obj "Header")
-                       ^SdkBytes sdk-bytes (.b attr-value)
-                       ^bytes byte-array (.asByteArray sdk-bytes)]
-                   byte-array))))
+                   (let [^Map fetched-obj @fetched-object
+                         ^AttributeValue attr-value (.get fetched-obj "Header")
+                         ^SdkBytes sdk-bytes (.b attr-value)
+                         ^bytes byte-array (.asByteArray sdk-bytes)]
+                     byte-array)))))
 
   (-read-meta
     [_ _meta-size env]
@@ -281,8 +281,8 @@
   (-blob-exists?
     [_ store-key env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (boolean (seq (get-item client 
-                                                 table 
+                (go-try- (boolean (seq (get-item client
+                                                 table
                                                  (hash-map "Key" (attribute-value-s store-key))
                                                  consistent-read?))))))
 
