@@ -129,11 +129,12 @@
     (.putItem client request)))
 
 (defn ^Map get-item
-  [^DynamoDbClient client ^String table-name ^HashMap key]
+  [^DynamoDbClient client ^String table-name ^HashMap key ^java.lang.Boolean consistent-read?]
   (try
     (let [^GetItemRequest request (-> (GetItemRequest/builder)
                                       (.tableName table-name)
                                       (.key key)
+                                      (.consistentRead consistent-read)
                                       .build)]
       (into {} (.item (.getItem client request))))
     (catch Exception _
@@ -195,7 +196,10 @@
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (when-not @fetched-object
-                   (reset! fetched-object (get-item (:client table) (:table table) (hash-map "Key" (attribute-value-s key)))))
+                   (reset! fetched-object (get-item (:client table)
+                                                    (:table table)
+                                                    (hash-map "Key" (attribute-value-s key))
+                                                    (:consistent-read? table)))
                  (let [^Map fetched-obj @fetched-object
                        ^AttributeValue attr-value (.get fetched-obj "Header")
                        ^SdkBytes sdk-bytes (.b attr-value)
@@ -260,7 +264,7 @@
     (if (:sync? env) nil (go-try- nil))))
 
 (defrecord DynamoDBStore
-           [^DynamoDbClient client ^String table]
+           [^DynamoDbClient client ^String table ^java.lang.Boolean consistent-read?]
 
   PBackingStore
 
@@ -277,13 +281,16 @@
   (-blob-exists?
     [_ store-key env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (boolean (seq (get-item client table (hash-map "Key" (attribute-value-s store-key))))))))
+                (go-try- (boolean (seq (get-item client 
+                                                 table 
+                                                 (hash-map "Key" (attribute-value-s store-key))
+                                                 consistent-read?))))))
 
   (-copy
     [_ from to env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
-                 (let [item (get-item client table (hash-map "Key" (attribute-value-s from)))]
+                 (let [item (get-item client table (hash-map "Key" (attribute-value-s from)) consistent-read?)]
                    (when item
                      (put-item client table (assoc item "Key" (attribute-value-s to))))))))
 
@@ -291,7 +298,7 @@
     [_ from to env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
-                 (let [item (get-item client table (hash-map "Key" (attribute-value-s from)))]
+                 (let [item (get-item client table (hash-map "Key" (attribute-value-s from)) consistent-read?)]
                    (when item
                      (put-item client table (assoc item "Key" (attribute-value-s to)))
                      (delete-item client table (hash-map "Key" (attribute-value-s from))))))))
@@ -340,9 +347,10 @@
   (let [complete-opts (merge {:sync? true :read-capacity 50 :write-capacity 50} opts)
         ^DynamoDbClient client (dynamodb-client dynamodb-spec)
         ^String table-name (:table dynamodb-spec)
+        ^java.lang.Boolean consistent-read? (or (:consistent-read? dynamodb-spec) false)
         _ (when-not (table-exists? client table-name)
             (create-dynamodb-table client table-name complete-opts))
-        backing (DynamoDBStore. client table-name)
+        backing (DynamoDBStore. client table-name consistent-read?)
         config (merge {:opts               complete-opts
                        :config             {:sync-blob? true
                                             :in-place? false
@@ -355,7 +363,9 @@
 (defn delete-store
   [dynamodb-spec & {:keys [opts]}]
   (let [complete-opts (merge {:sync? true} opts)
-        backing (DynamoDBStore. (dynamodb-client dynamodb-spec) (:table dynamodb-spec))]
+        backing (DynamoDBStore. (dynamodb-client dynamodb-spec)
+                                (:table dynamodb-spec)
+                                (or (:consistent-read? dynamodb-spec) false))]
     (-delete-store backing complete-opts)))
 
 (defn release
