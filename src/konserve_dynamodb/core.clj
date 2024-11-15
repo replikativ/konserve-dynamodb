@@ -60,6 +60,17 @@
         (.credentialsProvider builder credentials)))
     (.build builder)))
 
+(defn table-exists?
+  [^DynamoDbClient client ^String table-name]
+  (try
+    (let [^DescribeTableRequest request (-> (DescribeTableRequest/builder)
+                                            (.tableName table-name)
+                                            .build)]
+      (.describeTable client request)
+      true)
+    (catch ResourceNotFoundException _
+      false)))
+
 (defn create-dynamodb-table
   [^DynamoDbClient client table-name {:keys [read-capacity write-capacity]}]
   (let [^AttributeDefinition$Builder attribute-definition-builder (AttributeDefinition/builder)
@@ -100,18 +111,9 @@
 
         ^CreateTableRequest create-table-request
         (.build create-table-request-builder)]
-    (.createTable client create-table-request)))
-
-(defn table-exists?
-  [^DynamoDbClient client ^String table-name]
-  (try
-    (let [^DescribeTableRequest request (-> (DescribeTableRequest/builder)
-                                            (.tableName table-name)
-                                            .build)]
-      (.describeTable client request)
-      true)
-    (catch ResourceNotFoundException _
-      false)))
+    (.createTable client create-table-request)
+    (while (not (table-exists? client table-name))
+      (Thread/sleep 5000))))
 
 (defn delete-dynamodb-table
   [^DynamoDbClient client ^String table-name]
