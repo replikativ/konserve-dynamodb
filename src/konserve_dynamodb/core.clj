@@ -111,9 +111,7 @@
 
         ^CreateTableRequest create-table-request
         (.build create-table-request-builder)]
-    (.createTable client create-table-request)
-    (while (not (table-exists? client table-name))
-      (Thread/sleep 5000))))
+    (.createTable client create-table-request)))
 
 (defn delete-dynamodb-table
   [^DynamoDbClient client ^String table-name]
@@ -354,7 +352,7 @@
             (create-dynamodb-table client table-name complete-opts))
         backing (DynamoDBStore. client table-name consistent-read?)
         config (merge {:opts               complete-opts
-                       :config             {:sync-blob? false
+                       :config             {:sync-blob? true
                                             :in-place? true
                                             :no-backup? true
                                             :lock-blob? true}
