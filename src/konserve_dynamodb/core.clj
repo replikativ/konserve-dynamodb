@@ -31,6 +31,7 @@
     DeleteItemResponse
     DeleteTableRequest
     DescribeTableRequest
+    DescribeTableResponse
     GetItemRequest
     KeySchemaElement
     KeySchemaElement$Builder
@@ -42,7 +43,8 @@
     ResourceNotFoundException
     ScalarAttributeType
     ScanRequest
-    ScanResponse)))
+    ScanResponse
+    TableDescription)))
 
 (set! *warn-on-reflection* true)
 
@@ -66,8 +68,7 @@
     (let [^DescribeTableRequest request (-> (DescribeTableRequest/builder)
                                             (.tableName table-name)
                                             .build)]
-      (.describeTable client request)
-      true)
+      (= ^String (.tableStatusAsString ^TableDescription (.table ^DescribeTableResponse (.describeTable client request))) "ACTIVE"))
     (catch ResourceNotFoundException _
       false)))
 
@@ -112,7 +113,7 @@
         ^CreateTableRequest create-table-request
         (.build create-table-request-builder)]
     (.createTable client create-table-request)
-    (while (not (table-exists? table-name))
+    (while (not (table-exists? client table-name))
       (Thread/sleep 2000))))
 
 (defn delete-dynamodb-table
