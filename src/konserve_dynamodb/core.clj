@@ -111,7 +111,9 @@
 
         ^CreateTableRequest create-table-request
         (.build create-table-request-builder)]
-    (.createTable client create-table-request)))
+    (.createTable client create-table-request)
+    (while (not (table-exists? table-name))
+      (Thread/sleep 2000))))
 
 (defn delete-dynamodb-table
   [^DynamoDbClient client ^String table-name]
@@ -344,7 +346,7 @@
 (defn connect-store
   [dynamodb-spec & {:keys [opts]
                     :as params}]
-  (let [complete-opts (merge {:sync? true :read-capacity 50 :write-capacity 50} opts)
+  (let [complete-opts (merge {:sync? true :read-capacity 500 :write-capacity 500} opts)
         ^DynamoDbClient client (dynamodb-client dynamodb-spec)
         ^String table-name (:table dynamodb-spec)
         ^java.lang.Boolean consistent-read? (or (:consistent-read? dynamodb-spec) false)
