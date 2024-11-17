@@ -354,8 +354,9 @@
             (create-dynamodb-table client table-name complete-opts))
         backing (DynamoDBStore. client table-name consistent-read?)
         config (merge {:opts               complete-opts
-                       :config             {:sync-blob? true
-                                            :in-place? false
+                       :config             {:sync-blob? false
+                                            :in-place? true
+                                            :no-backup? true
                                             :lock-blob? true}
                        :default-serializer :FressianSerializer
                        :buffer-size        (* 1024 1024)}
