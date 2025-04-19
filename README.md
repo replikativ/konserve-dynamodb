@@ -33,6 +33,11 @@ For asynchronous execution take a look at the [konserve example](https://github.
 (k/get-in store [:bar] nil {:sync? true})
 (k/dissoc store :bar {:sync? true})
 
+;; Multi-key atomic operations (limited to 100 items per transaction by DynamoDB)
+(k/multi-assoc store {:user1 {:name "Alice"} 
+                       :user2 {:name "Bob"}} 
+                {:sync? true})
+
 (k/append store :error-log {:type :horrible} {:sync? true})
 (k/log store :error-log {:sync? true})
 
@@ -51,6 +56,19 @@ create it before and delete it after usage form a privileged account. Connection
 will otherwise create the table and it can be deleted by `delete-store`. You can activate
 [Amazon X-Ray](https://aws.amazon.com/xray/) by setting `:x-ray?` to `true` in
 the DynamoDB spec.
+
+## Multi-key Operations
+
+This backend supports atomic multi-key operations through the `multi-assoc` function, which allows you to update multiple keys in a single atomic transaction. This ensures that either all operations succeed or all fail (ACID guarantees).
+
+``` clojure
+;; Update multiple keys atomically in a single transaction
+(k/multi-assoc store {:user1 {:name "Alice"} 
+                      :user2 {:name "Bob"}} 
+               {:sync? true})
+```
+
+The implementation uses DynamoDB's TransactWriteItems API to ensure atomicity. Note that DynamoDB has a limit of 100 items per transaction, so attempting to update more than 100 keys in a single operation will result in an error.
 
 ## Authentication
 

@@ -2,10 +2,11 @@
   "DynamoDB based konserve backend."
   (:require
    [konserve.impl.defaults :refer [connect-default-store]]
-   [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock -delete-store]]
+   [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
+                                         PMultiWriteBackingStore -delete-store]]
    [konserve.utils :refer [async+sync *default-sync-translation*]]
    [superv.async :refer [go-try-]]
-   [taoensso.timbre :refer [info trace]])
+   [taoensso.timbre :refer [info trace warn]])
   (:import
    (java.io
     ByteArrayInputStream)
@@ -13,7 +14,8 @@
     URI)
    (java.util
     HashMap
-    Map)
+    Map
+    ArrayList)
    (software.amazon.awssdk.auth.credentials
     AwsBasicCredentials
     StaticCredentialsProvider)
@@ -44,7 +46,11 @@
     ScalarAttributeType
     ScanRequest
     ScanResponse
-    TableDescription)))
+    TableDescription
+    TransactWriteItem
+    TransactWriteItemsRequest
+    TransactWriteItemsResponse
+    Put)))
 
 (set! *warn-on-reflection* true)
 
@@ -130,6 +136,15 @@
                                     (.item item)
                                     .build)]
     (.putItem client request)))
+
+(defn ^TransactWriteItemsResponse transact-write-items
+  "Execute multiple write operations in a single, atomic transaction.
+   Limited to 100 items per transaction by DynamoDB."
+  [^DynamoDbClient client ^ArrayList transact-items]
+  (let [^TransactWriteItemsRequest request (-> (TransactWriteItemsRequest/builder)
+                                               (.transactItems transact-items)
+                                               .build)]
+    (.transactWriteItems client request)))
 
 (defn ^Map get-item
   [^DynamoDbClient client ^String table-name ^HashMap key ^java.lang.Boolean consistent-read?]
@@ -342,12 +357,55 @@
                         (map (fn [^Map item]
                                (let [^AttributeValue attr-value (.get item "Key")]
                                  (.s attr-value))))
-                        doall))))))
+                        doall)))))
+
+  ;; Implementation for atomic multi-key writes
+  PMultiWriteBackingStore
+  (-multi-write-blobs
+    [_ store-key-values env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (if (> (count store-key-values) 100)
+          ;; DynamoDB TransactWriteItems API has a limit of 100 items per transaction
+                   (throw (ex-info "DynamoDB TransactWriteItems exceeds item limit (max 100)"
+                                   {:type :not-supported
+                                    :reason "Too many items for a single transaction"
+                                    :item-count (count store-key-values)}))
+                   (try
+            ;; Create a transact write items request with all our items
+                     (let [^ArrayList transact-items (ArrayList.)
+                           _ (doseq [[store-key data] store-key-values]
+                               (let [{:keys [header meta value]} data
+                            ;; Create a map with the item data
+                                     item-map (doto (HashMap.)
+                                                (.put "Key" (attribute-value-s store-key))
+                                                (.put "Header" (attribute-value-b header))
+                                                (.put "Meta" (attribute-value-b meta))
+                                                (.put "Value" (attribute-value-b value)))
+                            ;; Create a Put request for this item
+                                     ^Put put (.build (.item (.tableName (Put/builder) table) item-map))
+                            ;; Create a TransactWriteItem with the Put request
+                                     ^TransactWriteItem transact-write-item (.build (.put (TransactWriteItem/builder) put))]
+                        ;; Add to our list of TransactWriteItems
+                                 (.add transact-items transact-write-item)))
+                  ;; Execute the transaction
+                           _ (transact-write-items client transact-items)
+                  ;; If we get here, all writes succeeded
+                  ;; Create a result map with all keys mapping to true
+                           results (into {} (map (fn [[store-key _]] [store-key true]) store-key-values))]
+                       results)
+            ;; Handle any transaction errors
+                     (catch Exception e
+                       (warn "TransactWriteItems failed:" (.getMessage e))
+                       (throw (ex-info "DynamoDB TransactWriteItems failed"
+                                       {:type :not-supported
+                                        :reason "Transaction failed"
+                                        :cause e})))))))))
 
 (defn connect-store
   [dynamodb-spec & {:keys [opts]
                     :as params}]
-  (let [complete-opts (merge {:sync? true :read-capacity 500 :write-capacity 500} opts)
+  (let [complete-opts (merge {:sync? true :read-capacity 5 :write-capacity 5} opts)
         ^DynamoDbClient client (dynamodb-client dynamodb-spec)
         ^String table-name (:table dynamodb-spec)
         ^java.lang.Boolean consistent-read? (or (:consistent-read? dynamodb-spec) false)
