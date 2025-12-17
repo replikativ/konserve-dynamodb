@@ -3,43 +3,40 @@
   (:require
    [konserve.impl.defaults :refer [connect-default-store]]
    [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
-                                         PMultiWriteBackingStore -delete-store]]
+                                         PMultiWriteBackingStore PMultiReadBackingStore
+                                         -delete-store]]
    [konserve.utils :refer [async+sync *default-sync-translation*]]
    [superv.async :refer [go-try-]]
    [taoensso.timbre :refer [info trace warn]])
   (:import
-   (java.io
-    ByteArrayInputStream)
-   (java.net
-    URI)
-   (java.util
-    HashMap
-    Map
-    ArrayList)
-   (software.amazon.awssdk.auth.credentials
-    AwsBasicCredentials
-    StaticCredentialsProvider)
-   (software.amazon.awssdk.core
-    SdkBytes)
-   (software.amazon.awssdk.services.dynamodb
-    DynamoDbClient)
+   (java.io ByteArrayInputStream)
+   (java.net URI)
+   (java.util HashMap Map ArrayList)
+   (software.amazon.awssdk.auth.credentials AwsBasicCredentials StaticCredentialsProvider)
+   (software.amazon.awssdk.core SdkBytes)
+   (software.amazon.awssdk.services.dynamodb DynamoDbClient)
    (software.amazon.awssdk.services.dynamodb.model
     AttributeDefinition
     AttributeDefinition$Builder
     AttributeValue
+    BatchGetItemRequest
+    BatchGetItemResponse
     CreateTableRequest
     CreateTableRequest$Builder
+    Delete
     DeleteItemRequest
     DeleteItemResponse
     DeleteTableRequest
     DescribeTableRequest
     DescribeTableResponse
     GetItemRequest
+    KeysAndAttributes
     KeySchemaElement
     KeySchemaElement$Builder
     KeyType
     ProvisionedThroughput
     ProvisionedThroughput$Builder
+    Put
     PutItemRequest
     PutItemResponse
     ResourceNotFoundException
@@ -49,8 +46,7 @@
     TableDescription
     TransactWriteItem
     TransactWriteItemsRequest
-    TransactWriteItemsResponse
-    Put)))
+    TransactWriteItemsResponse)))
 
 (set! *warn-on-reflection* true)
 
@@ -173,6 +169,33 @@
                                  .build)]
     (.scan client request)))
 
+(defn ^BatchGetItemResponse batch-get-items
+  "Fetch multiple items in a single BatchGetItem call.
+   Returns a map of {store-key -> item-map} for found items.
+   Limited to 100 items per request by DynamoDB."
+  [^DynamoDbClient client ^String table-name store-keys ^Boolean consistent-read?]
+  (when (seq store-keys)
+    (let [;; Build list of keys to fetch
+          keys-list (java.util.ArrayList.)
+          _ (doseq [store-key store-keys]
+              (let [key-map (doto (java.util.HashMap.)
+                              (.put "Key" (.build (.s (AttributeValue/builder) store-key))))]
+                (.add keys-list key-map)))
+          ;; Build KeysAndAttributes with consistency setting
+          ^KeysAndAttributes keys-and-attrs (-> (KeysAndAttributes/builder)
+                                                 (.keys keys-list)
+                                                 (.consistentRead consistent-read?)
+                                                 .build)
+          ;; Build request items map
+          request-items (doto (java.util.HashMap.)
+                          (.put table-name keys-and-attrs))
+          ;; Build and execute request
+          ^BatchGetItemRequest request (-> (BatchGetItemRequest/builder)
+                                           (.requestItems request-items)
+                                           .build)
+          ^BatchGetItemResponse response (.batchGetItem client request)]
+      response)))
+
 (defn- attribute-value-s
   [^String s]
   (.build (.s (AttributeValue/builder) s)))
@@ -217,12 +240,12 @@
                    (reset! fetched-object (get-item (:client table)
                                                     (:table table)
                                                     (hash-map "Key" (attribute-value-s key))
-                                                    (:consistent-read? table)))
-                   (let [^Map fetched-obj @fetched-object
-                         ^AttributeValue attr-value (.get fetched-obj "Header")
-                         ^SdkBytes sdk-bytes (.b attr-value)
-                         ^bytes byte-array (.asByteArray sdk-bytes)]
-                     byte-array)))))
+                                                    (:consistent-read? table))))
+                 (let [^Map fetched-obj @fetched-object
+                       ^AttributeValue attr-value (.get fetched-obj "Header")
+                       ^SdkBytes sdk-bytes (.b attr-value)
+                       ^bytes byte-array (.asByteArray sdk-bytes)]
+                   byte-array))))
 
   (-read-meta
     [_ _meta-size env]
@@ -400,7 +423,93 @@
                        (throw (ex-info "DynamoDB TransactWriteItems failed"
                                        {:type :not-supported
                                         :reason "Transaction failed"
-                                        :cause e})))))))))
+                                        :cause e}))))))))
+
+  (-multi-delete-blobs
+    [_ store-keys env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (if (empty? store-keys)
+                   {}
+                   (if (> (count store-keys) 100)
+                     ;; DynamoDB TransactWriteItems API has a limit of 100 items per transaction
+                     (throw (ex-info "DynamoDB TransactWriteItems exceeds item limit (max 100)"
+                                     {:type :not-supported
+                                      :reason "Too many items for a single transaction"
+                                      :item-count (count store-keys)}))
+                     (try
+                       ;; First check which keys exist using BatchGetItem
+                       (let [^BatchGetItemResponse response (batch-get-items client table store-keys consistent-read?)
+                             ;; Get the items that were found
+                             found-items (when response
+                                           (get (.responses response) table))
+                             existing-keys (when found-items
+                                             (into #{}
+                                                   (map (fn [^java.util.Map item]
+                                                          (let [^AttributeValue key-attr (.get item "Key")]
+                                                            (.s key-attr)))
+                                                        found-items)))
+                             existing-keys (or existing-keys #{})]
+                         ;; Only delete if there are existing keys
+                         (when (seq existing-keys)
+                           (let [^ArrayList transact-items (ArrayList.)
+                                 _ (doseq [store-key existing-keys]
+                                     (let [;; Create key map for delete
+                                           key-map (doto (HashMap.)
+                                                     (.put "Key" (attribute-value-s store-key)))
+                                           ;; Create Delete request
+                                           ^Delete delete-req (.build (.key (.tableName (Delete/builder) table) key-map))
+                                           ;; Create TransactWriteItem with Delete
+                                           ^TransactWriteItem transact-write-item (.build (.delete (TransactWriteItem/builder) delete-req))]
+                                       (.add transact-items transact-write-item)))]
+                             (transact-write-items client transact-items)))
+                         ;; Return map showing which keys existed
+                         (reduce (fn [acc k]
+                                   (assoc acc k (contains? existing-keys k)))
+                                 {}
+                                 store-keys))
+                       (catch Exception e
+                         (warn "TransactWriteItems (delete) failed:" (.getMessage e))
+                         (throw (ex-info "DynamoDB TransactWriteItems (delete) failed"
+                                         {:type :not-supported
+                                          :reason "Transaction failed"
+                                          :cause e})))))))))
+
+  PMultiReadBackingStore
+  (-multi-read-blobs
+    [this store-keys env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (if (empty? store-keys)
+                   {}
+                   (if (> (count store-keys) 100)
+                     ;; DynamoDB BatchGetItem API has a limit of 100 items per request
+                     (throw (ex-info "DynamoDB BatchGetItem exceeds item limit (max 100)"
+                                     {:type :not-supported
+                                      :reason "Too many items for a single request"
+                                      :item-count (count store-keys)}))
+                     (try
+                       (let [^BatchGetItemResponse response (batch-get-items client table store-keys consistent-read?)
+                             ;; Get the items that were found for our table
+                             found-items (when response
+                                           (get (.responses response) table))]
+                         ;; Build sparse map of store-key -> DynamoDBBlob with pre-populated data
+                         (if found-items
+                           (reduce (fn [acc ^java.util.Map item]
+                                     (let [^AttributeValue key-attr (.get item "Key")
+                                           store-key (.s key-attr)
+                                           ;; Pre-populate fetched-object with the item data (eager loading)
+                                           blob (DynamoDBBlob. this store-key (atom {}) (atom (into {} item)))]
+                                       (assoc acc store-key blob)))
+                                   {}
+                                   found-items)
+                           {}))
+                       (catch Exception e
+                         (warn "BatchGetItem failed:" (.getMessage e))
+                         (throw (ex-info "DynamoDB BatchGetItem failed"
+                                         {:type :not-supported
+                                          :reason "Batch read failed"
+                                          :cause e}))))))))))
 
 (defn connect-store
   [dynamodb-spec & {:keys [opts]

@@ -59,16 +59,36 @@ the DynamoDB spec.
 
 ## Multi-key Operations
 
-This backend supports atomic multi-key operations through the `multi-assoc` function, which allows you to update multiple keys in a single atomic transaction. This ensures that either all operations succeed or all fail (ACID guarantees).
+This backend supports atomic multi-key operations (`multi-assoc`, `multi-get`, `multi-dissoc`), allowing you to read, write, or delete multiple keys in a single operation.
+
+**Important: All operations are limited to 100 items** due to DynamoDB API constraints. Exceeding this limit will throw an error.
 
 ``` clojure
-;; Update multiple keys atomically in a single transaction
-(k/multi-assoc store {:user1 {:name "Alice"} 
-                      :user2 {:name "Bob"}} 
+;; Write multiple keys atomically (uses TransactWriteItems API)
+(k/multi-assoc store {:user1 {:name "Alice"}
+                      :user2 {:name "Bob"}}
                {:sync? true})
+
+;; Read multiple keys in one request (uses BatchGetItem API)
+(k/multi-get store [:user1 :user2 :user3] {:sync? true})
+;; => {:user1 {:name "Alice"}, :user2 {:name "Bob"}}
+;; Note: Returns sparse map - only found keys are included
+
+;; Delete multiple keys atomically (uses TransactWriteItems API)
+(k/multi-dissoc store [:user1 :user2] {:sync? true})
+;; => {:user1 true, :user2 true}
+;; Returns map indicating which keys existed before deletion
 ```
 
-The implementation uses DynamoDB's TransactWriteItems API to ensure atomicity. Note that DynamoDB has a limit of 100 items per transaction, so attempting to update more than 100 keys in a single operation will result in an error.
+### API Details
+
+| Operation | DynamoDB API | Atomicity | Limit |
+|-----------|--------------|-----------|-------|
+| `multi-assoc` | TransactWriteItems | Atomic (all-or-nothing) | 100 items |
+| `multi-get` | BatchGetItem | Eventual/Strong consistency* | 100 items |
+| `multi-dissoc` | TransactWriteItems | Atomic (all-or-nothing) | 100 items |
+
+*Consistency for reads depends on the `:consistent-read?` option in your `dynamodb-spec` (default: `false` for eventual consistency).
 
 ## Authentication
 
@@ -81,6 +101,6 @@ text or code files. Alternatively you can provide the credentials in the
 
 ## License
 
-Copyright © 2024 Christian Weilbach
+Copyright © 2024-2025 Christian Weilbach
 
 Licensed under Eclipse Public License (see [LICENSE](LICENSE)).
