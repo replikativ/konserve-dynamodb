@@ -183,9 +183,9 @@
                 (.add keys-list key-map)))
           ;; Build KeysAndAttributes with consistency setting
           ^KeysAndAttributes keys-and-attrs (-> (KeysAndAttributes/builder)
-                                                 (.keys keys-list)
-                                                 (.consistentRead consistent-read?)
-                                                 .build)
+                                                (.keys keys-list)
+                                                (.consistentRead consistent-read?)
+                                                .build)
           ;; Build request items map
           request-items (doto (java.util.HashMap.)
                           (.put table-name keys-and-attrs))
