@@ -6,6 +6,7 @@
                                          PMultiWriteBackingStore PMultiReadBackingStore
                                          -delete-store]]
    [konserve.utils :refer [async+sync *default-sync-translation*]]
+   [konserve.store :as store]
    [superv.async :refer [go-try-]]
    [taoensso.timbre :refer [info trace warn]])
   (:import
@@ -587,3 +588,27 @@
   (release store {:sync? true})
 
   (delete-store dynamodb-spec :opts {:sync? true}))
+
+;; =============================================================================
+;; Multimethod Registration for konserve.store dispatch
+;; =============================================================================
+
+(defmethod store/connect-store :dynamodb
+  [{:keys [region table access-key secret consistent-read?] :as config}]
+  (let [dynamodb-spec (dissoc config :backend :opts)
+        opts (:opts config)]
+    (connect-store dynamodb-spec :opts opts)))
+
+(defmethod store/empty-store :dynamodb
+  [config]
+  (store/connect-store config))
+
+(defmethod store/delete-store :dynamodb
+  [{:keys [region table] :as config}]
+  (let [dynamodb-spec (dissoc config :backend :opts)]
+    (delete-store dynamodb-spec :opts (:opts config))))
+
+(defmethod store/release-store :dynamodb
+  [{:keys [table] :as _config} store]
+  ;; DynamoDB doesn't require explicit release, but we provide a no-op
+  nil)
