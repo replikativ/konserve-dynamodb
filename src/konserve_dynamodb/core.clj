@@ -348,7 +348,15 @@
   (-create-store
     [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (info "DynamoDB table setup complete."))))
+                (go-try-
+                 (when-not (table-exists? client table)
+                   (create-dynamodb-table client table env))
+                 (info "DynamoDB table created."))))
+
+  (-store-exists?
+    [_ env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try- (table-exists? client table))))
 
   (-sync-store
     [_ env]
@@ -519,8 +527,6 @@
         ^DynamoDbClient client (dynamodb-client dynamodb-spec)
         ^String table-name (:table dynamodb-spec)
         ^java.lang.Boolean consistent-read? (or (:consistent-read? dynamodb-spec) false)
-        _ (when-not (table-exists? client table-name)
-            (create-dynamodb-table client table-name complete-opts))
         backing (DynamoDBStore. client table-name consistent-read?)
         config (merge {:opts               complete-opts
                        :config             {:sync-blob? true
@@ -539,6 +545,14 @@
                                 (:table dynamodb-spec)
                                 (or (:consistent-read? dynamodb-spec) false))]
     (-delete-store backing complete-opts)))
+
+(defn store-exists?
+  [dynamodb-spec & {:keys [opts]}]
+  (let [complete-opts (merge {:sync? true} opts)
+        backing (DynamoDBStore. (dynamodb-client dynamodb-spec)
+                                (:table dynamodb-spec)
+                                (or (:consistent-read? dynamodb-spec) false))]
+    (konserve.impl.storage-layout/-store-exists? backing complete-opts)))
 
 (defn release
   "Release the store connection."
@@ -596,12 +610,27 @@
 (defmethod store/connect-store :dynamodb
   [{:keys [region table access-key secret consistent-read?] :as config}]
   (let [dynamodb-spec (dissoc config :backend :opts)
-        opts (:opts config)]
+        opts (or (:opts config) {:sync? true})
+        exists (store-exists? dynamodb-spec :opts opts)]
+    (when-not (if (:sync? opts) exists @exists)
+      (throw (ex-info (str "DynamoDB table does not exist: " table)
+                      {:table table :region region :config config})))
     (connect-store dynamodb-spec :opts opts)))
 
-(defmethod store/empty-store :dynamodb
-  [config]
-  (store/connect-store config))
+(defmethod store/create-store :dynamodb
+  [{:keys [region table] :as config}]
+  (let [dynamodb-spec (dissoc config :backend :opts)
+        opts (or (:opts config) {:sync? true})
+        exists (store-exists? dynamodb-spec :opts opts)]
+    (when (if (:sync? opts) exists @exists)
+      (throw (ex-info (str "DynamoDB table already exists: " table)
+                      {:table table :region region :config config})))
+    (connect-store dynamodb-spec :opts opts)))
+
+(defmethod store/store-exists? :dynamodb
+  [{:keys [region table] :as config}]
+  (let [dynamodb-spec (dissoc config :backend :opts)]
+    (store-exists? dynamodb-spec :opts (:opts config))))
 
 (defmethod store/delete-store :dynamodb
   [{:keys [region table] :as config}]
