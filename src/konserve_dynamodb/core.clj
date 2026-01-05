@@ -1,6 +1,7 @@
 (ns konserve-dynamodb.core
   "DynamoDB based konserve backend."
   (:require
+   [clojure.core.async :refer [<!!]]
    [konserve.impl.defaults :refer [connect-default-store]]
    [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
                                          PMultiWriteBackingStore PMultiReadBackingStore
@@ -612,7 +613,7 @@
   (let [dynamodb-spec (dissoc config :backend :opts)
         opts (or (:opts config) {:sync? true})
         exists (store-exists? dynamodb-spec :opts opts)]
-    (when-not (if (:sync? opts) exists @exists)
+    (when-not (if (:sync? opts) exists (<!! exists))
       (throw (ex-info (str "DynamoDB table does not exist: " table)
                       {:table table :region region :config config})))
     (connect-store dynamodb-spec :opts opts)))
@@ -622,7 +623,7 @@
   (let [dynamodb-spec (dissoc config :backend :opts)
         opts (or (:opts config) {:sync? true})
         exists (store-exists? dynamodb-spec :opts opts)]
-    (when (if (:sync? opts) exists @exists)
+    (when (if (:sync? opts) exists (<!! exists))
       (throw (ex-info (str "DynamoDB table already exists: " table)
                       {:table table :region region :config config})))
     (connect-store dynamodb-spec :opts opts)))
