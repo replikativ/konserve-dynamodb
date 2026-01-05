@@ -14,16 +14,25 @@ For asynchronous execution take a look at the [konserve example](https://github.
 
 
 ``` clojure
-(require '[konserve-dynamodb.core :refer [connect-store]]
+(require '[konserve-dynamodb.core]  ;; Registers the :dynamodb backend
          '[konserve.core :as k])
 
-(def dynamodb-spec
-  {:region "us-west-1"
-   :table  "konserve-demo"
-   })
+(def dynamodb-config
+  {:backend :dynamodb
+   :region "us-west-1"
+   :table "konserve-demo"
+   :opts {:sync? true}})
 
-(def store (connect-store dynamodb-spec :opts {:sync? true}))
+;; Create a new table (errors if already exists)
+(def store (k/create-store dynamodb-config))
 
+;; Or connect to existing table (errors if doesn't exist)
+;; (def store (k/connect-store dynamodb-config))
+
+;; Check if table exists
+(k/store-exists? dynamodb-config) ;; => true
+
+;; Use the store
 (k/assoc-in store ["foo" :bar] {:foo "baz"} {:sync? true})
 (k/get-in store ["foo"] nil {:sync? true})
 (k/exists? store "foo" {:sync? true})
@@ -34,8 +43,8 @@ For asynchronous execution take a look at the [konserve example](https://github.
 (k/dissoc store :bar {:sync? true})
 
 ;; Multi-key atomic operations (limited to 100 items per transaction by DynamoDB)
-(k/multi-assoc store {:user1 {:name "Alice"} 
-                       :user2 {:name "Bob"}} 
+(k/multi-assoc store {:user1 {:name "Alice"}
+                       :user2 {:name "Bob"}}
                 {:sync? true})
 
 (k/append store :error-log {:type :horrible} {:sync? true})
@@ -48,6 +57,9 @@ For asynchronous execution take a look at the [konserve example](https://github.
 (k/bget store :binbar (fn [{:keys [input-stream]}]
                         (map byte (slurp input-stream)))
        {:sync? true})
+
+;; Clean up
+(k/delete-store dynamodb-config)
 
 ```
 
