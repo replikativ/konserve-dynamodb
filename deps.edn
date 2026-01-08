@@ -1,6 +1,6 @@
 {:paths ["src"]
  :deps {com.taoensso/timbre {:mvn/version "5.1.2"}
-        io.replikativ/konserve {:mvn/version "0.8.327"}
+        io.replikativ/konserve {:mvn/version "0.9.331"}
         io.replikativ/superv.async {:mvn/version "0.3.47"}
         org.clojure/clojure {:mvn/version "1.11.1"}
 
@@ -13,10 +13,10 @@
                                                         :exclusions  [software.amazon.awssdk/netty-nio-client
                                                                       software.amazon.awssdk/apache-client]}
         com.amazonaws/aws-xray-recorder-sdk-aws-sdk-v2 {:mvn/version "2.14.0"}}
- :aliases {:dev    {:override-deps {io.replikativ/konserve {:local/root "../konserve"}}
-                    :extra-paths ["test"]}
+ :aliases {:dev    {:extra-paths ["test"]}
            :test   {:extra-deps  {lambdaisland/kaocha {:mvn/version "1.60.977"}}
-                    :extra-paths ["test"]}
+                    :extra-paths ["test"]
+                    #_#_:main-opts ["-m" "kaocha.runner"]}
            :jar    {:extra-deps {seancorfield/depstar {:mvn/version "1.1.116"}}
                     :main-opts ["-m" "hf.depstar.jar" "replikativ-konserve-dynamodb.jar"]}
            :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.7.0"}}

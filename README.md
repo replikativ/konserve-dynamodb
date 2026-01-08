@@ -8,91 +8,35 @@ Add to your dependencies:
 
 [![Clojars Project](http://clojars.org/io.replikativ/konserve-dynamodb/latest-version.svg)](http://clojars.org/io.replikativ/konserve-dynamodb)
 
-### Example
-
-For asynchronous execution take a look at the [konserve example](https://github.com/replikativ/konserve#asynchronous-execution).
-
+### Configuration
 
 ``` clojure
 (require '[konserve-dynamodb.core]  ;; Registers the :dynamodb backend
          '[konserve.core :as k])
 
-(def dynamodb-config
+(def config
   {:backend :dynamodb
    :region "us-west-1"
    :table "konserve-demo"
-   :opts {:sync? true}})
+   :id #uuid "550e8400-e29b-41d4-a716-446655440000"
+   ;; Optional:
+   :access-key "your-access-key"
+   :secret "your-secret"
+   :consistent-read? false  ;; Default: eventual consistency
+   :x-ray? false})          ;; Enable AWS X-Ray tracing
 
-;; Create a new table (errors if already exists)
-(def store (k/create-store dynamodb-config))
-
-;; Or connect to existing table (errors if doesn't exist)
-;; (def store (k/connect-store dynamodb-config))
-
-;; Check if table exists
-(k/store-exists? dynamodb-config) ;; => true
-
-;; Use the store
-(k/assoc-in store ["foo" :bar] {:foo "baz"} {:sync? true})
-(k/get-in store ["foo"] nil {:sync? true})
-(k/exists? store "foo" {:sync? true})
-
-(k/assoc-in store [:bar] 42 {:sync? true})
-(k/update-in store [:bar] inc {:sync? true})
-(k/get-in store [:bar] nil {:sync? true})
-(k/dissoc store :bar {:sync? true})
-
-;; Multi-key atomic operations (limited to 100 items per transaction by DynamoDB)
-(k/multi-assoc store {:user1 {:name "Alice"}
-                       :user2 {:name "Bob"}}
-                {:sync? true})
-
-(k/append store :error-log {:type :horrible} {:sync? true})
-(k/log store :error-log {:sync? true})
-
-(let [ba (byte-array (* 10 1024 1024) (byte 42))]
-  (time (k/bassoc store "banana" ba {:sync? true})))
-
-(k/bassoc store :binbar (byte-array (range 10)) {:sync? true})
-(k/bget store :binbar (fn [{:keys [input-stream]}]
-                        (map byte (slurp input-stream)))
-       {:sync? true})
-
-;; Clean up
-(k/delete-store dynamodb-config)
-
+(def store (k/create-store config {:sync? true}))
 ```
 
-Note that you do not need full DynamoDB rights if you manage the bucket outside, i.e.
-create it before and delete it after usage form a privileged account. Connection
-will otherwise create the table and it can be deleted by `delete-store`. You can activate
-[Amazon X-Ray](https://aws.amazon.com/xray/) by setting `:x-ray?` to `true` in
-the DynamoDB spec.
+For API usage (assoc-in, get-in, delete-store, etc.), see the [konserve documentation](https://github.com/replikativ/konserve).
 
-## Multi-key Operations
+## Implementation Details
 
-This backend supports atomic multi-key operations (`multi-assoc`, `multi-get`, `multi-dissoc`), allowing you to read, write, or delete multiple keys in a single operation.
+### Multi-key Operations
 
-**Important: All operations are limited to 100 items** due to DynamoDB API constraints. Exceeding this limit will throw an error.
+This backend supports atomic multi-key operations (`multi-assoc`, `multi-get`, `multi-dissoc`).
 
-``` clojure
-;; Write multiple keys atomically (uses TransactWriteItems API)
-(k/multi-assoc store {:user1 {:name "Alice"}
-                      :user2 {:name "Bob"}}
-               {:sync? true})
-
-;; Read multiple keys in one request (uses BatchGetItem API)
-(k/multi-get store [:user1 :user2 :user3] {:sync? true})
-;; => {:user1 {:name "Alice"}, :user2 {:name "Bob"}}
-;; Note: Returns sparse map - only found keys are included
-
-;; Delete multiple keys atomically (uses TransactWriteItems API)
-(k/multi-dissoc store [:user1 :user2] {:sync? true})
-;; => {:user1 true, :user2 true}
-;; Returns map indicating which keys existed before deletion
-```
-
-### API Details
+**⚠️ Important: All multi-key operations are limited to 100 items** due to DynamoDB API constraints. Exceeding this limit will throw an error.
 
 | Operation | DynamoDB API | Atomicity | Limit |
 |-----------|--------------|-----------|-------|
@@ -100,7 +44,7 @@ This backend supports atomic multi-key operations (`multi-assoc`, `multi-get`, `
 | `multi-get` | BatchGetItem | Eventual/Strong consistency* | 100 items |
 | `multi-dissoc` | TransactWriteItems | Atomic (all-or-nothing) | 100 items |
 
-*Consistency for reads depends on the `:consistent-read?` option in your `dynamodb-spec` (default: `false` for eventual consistency).
+*Consistency for reads depends on the `:consistent-read?` option (default: `false` for eventual consistency).
 
 ## Authentication
 
@@ -113,6 +57,6 @@ text or code files. Alternatively you can provide the credentials in the
 
 ## License
 
-Copyright © 2024-2025 Christian Weilbach
+Copyright © 2024-2026 Christian Weilbach
 
 Licensed under Eclipse Public License (see [LICENSE](LICENSE)).
