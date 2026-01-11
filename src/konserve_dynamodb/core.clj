@@ -649,6 +649,6 @@
                  (delete-store dynamodb-spec)))))
 
 (defmethod store/-release-store :dynamodb
-  [_config _store _opts]
-  ;; DynamoDB doesn't require explicit release, but we provide a no-op
-  nil)
+  [_config _store opts]
+  ;; DynamoDB doesn't require explicit release, return proper async type
+  (if (:sync? opts) nil (go-try- nil)))
