@@ -6,7 +6,7 @@ A [DynamoDB](https://aws.amazon.com/dynamodb/) backend for [konserve](https://gi
 
 Add to your dependencies:
 
-[![Clojars Project](http://clojars.org/io.replikativ/konserve-dynamodb/latest-version.svg)](http://clojars.org/io.replikativ/konserve-dynamodb)
+[![Clojars Project](http://clojars.org/org.replikativ/konserve-dynamodb/latest-version.svg)](http://clojars.org/org.replikativ/konserve-dynamodb)
 
 ### Configuration
 
