@@ -9,7 +9,7 @@
    [konserve.utils :refer [async+sync *default-sync-translation*]]
    [konserve.store :as store]
    [superv.async :refer [go-try-]]
-   [taoensso.timbre :refer [info trace warn]])
+   [replikativ.logging :as log])
   (:import
    (java.io ByteArrayInputStream)
    (java.net URI)
@@ -352,7 +352,7 @@
                 (go-try-
                  (when-not (table-exists? client table)
                    (create-dynamodb-table client table env))
-                 (info "DynamoDB table created."))))
+                 (log/info :konserve.dynamodb/table-created "DynamoDB table created."))))
 
   (-store-exists?
     [_ env]
@@ -369,9 +369,9 @@
                 (go-try-
                  (try
                    (delete-dynamodb-table client table)
-                   (info "DynamoDB store deleted.")
+                   (log/info :konserve.dynamodb/store-deleted "DynamoDB store deleted.")
                    (catch ResourceNotFoundException _
-                     (info "DynamoDB table does not exist."))))))
+                     (log/info :konserve.dynamodb/table-not-found "DynamoDB table does not exist."))))))
 
   (-migratable
     [_ _key _store-key env]
@@ -429,7 +429,7 @@
                        results)
             ;; Handle any transaction errors
                      (catch Exception e
-                       (warn "TransactWriteItems failed:" (.getMessage e))
+                       (log/warn :konserve.dynamodb/transact-write-failed {:message (.getMessage e)})
                        (throw (ex-info "DynamoDB TransactWriteItems failed"
                                        {:type :not-supported
                                         :reason "Transaction failed"
@@ -479,7 +479,7 @@
                                  {}
                                  store-keys))
                        (catch Exception e
-                         (warn "TransactWriteItems (delete) failed:" (.getMessage e))
+                         (log/warn :konserve.dynamodb/transact-delete-failed {:message (.getMessage e)})
                          (throw (ex-info "DynamoDB TransactWriteItems (delete) failed"
                                          {:type :not-supported
                                           :reason "Transaction failed"
@@ -515,7 +515,7 @@
                                    found-items)
                            {}))
                        (catch Exception e
-                         (warn "BatchGetItem failed:" (.getMessage e))
+                         (log/warn :konserve.dynamodb/batch-get-failed {:message (.getMessage e)})
                          (throw (ex-info "DynamoDB BatchGetItem failed"
                                          {:type :not-supported
                                           :reason "Batch read failed"
