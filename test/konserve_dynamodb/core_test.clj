@@ -1,8 +1,9 @@
 (ns konserve-dynamodb.core-test
   (:require
    [clojure.core.async :refer [<!!]]
-   [clojure.test :refer [deftest testing]]
+   [clojure.test :refer [deftest testing is]]
    [konserve-dynamodb.core :as dynamo]
+   [konserve.impl.storage-layout :as sl]
    [konserve.store :as store]
    [konserve.compliance-test :refer [compliance-test]])
   (:import [java.util UUID]))
@@ -45,3 +46,14 @@
         (compliance-test st))
       (<!! (dynamo/release st {:sync? false}))
       (<!! (store/delete-store spec {:sync? false})))))
+
+(deftest dynamodb-read-miss-safe-marker-test
+  (testing "DynamoDB backing implements PReadMissSafe (io-operation skips the -blob-exists? probe on reads)"
+    (let [spec (assoc dynamodb-spec :backend :dynamodb :table "konserve-dynamodb-marker-test")]
+      (try (store/delete-store spec {:sync? true}) (catch Exception _))
+      (Thread/sleep 500)
+      (let [st (store/create-store spec {:sync? true})]
+        (Thread/sleep 500)
+        (is (satisfies? sl/PReadMissSafe (:backing st)))
+        (dynamo/release st {:sync? true})
+        (store/delete-store spec {:sync? true})))))

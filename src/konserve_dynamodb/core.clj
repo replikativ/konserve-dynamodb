@@ -5,6 +5,7 @@
    [konserve.impl.defaults :refer [connect-default-store]]
    [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
                                          PMultiWriteBackingStore PMultiReadBackingStore
+                                         PReadMissSafe store-key-not-found-ex
                                          -delete-store]]
    [konserve.utils :refer [async+sync *default-sync-translation*]]
    [konserve.store :as store]
@@ -244,10 +245,13 @@
                                                     (hash-map "Key" (attribute-value-s key))
                                                     (:consistent-read? table))))
                  (let [^Map fetched-obj @fetched-object
-                       ^AttributeValue attr-value (.get fetched-obj "Header")
-                       ^SdkBytes sdk-bytes (.b attr-value)
-                       ^bytes byte-array (.asByteArray sdk-bytes)]
-                   byte-array))))
+                       ^AttributeValue attr-value (get fetched-obj "Header")]
+                   ;; PReadMissSafe: an absent item is an empty map (GetItem returns
+                   ;; no Item), so there is no "Header". Signal not-found; io-operation's
+                   ;; read-first path converts it to the caller's :not-found.
+                   (when (nil? attr-value)
+                     (throw (store-key-not-found-ex key)))
+                   (.asByteArray ^SdkBytes (.b attr-value))))))
 
   (-read-meta
     [_ _meta-size env]
@@ -520,6 +524,13 @@
                                          {:type :not-supported
                                           :reason "Batch read failed"
                                           :cause e}))))))))))
+
+;; DynamoDB reads are read-miss-safe: -create-blob only constructs a DynamoDBBlob
+;; (no side effect), and -read-header throws store-key-not-found-ex when GetItem
+;; returns no item (empty map, no "Header"). So io-operation skips the -blob-exists?
+;; probe — a read is one GetItem, and update-in/assoc-in/bassoc drop their probe too.
+(extend-type DynamoDBStore
+  PReadMissSafe)
 
 (defn connect-store
   [dynamodb-spec & {:keys [opts]
