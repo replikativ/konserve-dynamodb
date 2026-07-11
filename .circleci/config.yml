@@ -3,6 +3,42 @@ version: 2.1
 orbs:
   tools: replikativ/clj-tools@0
 
+jobs:
+  # Cheap, always-on gate: load the namespace against the PINNED konserve, with no
+  # external service. A stale/incompatible konserve pin (e.g. one missing
+  # PReadMissSafe) fails here immediately.
+  smoke:
+    docker:
+      - image: clojure:temurin-21-tools-deps
+    steps:
+      - checkout
+      - run:
+          name: load namespace against pinned konserve
+          command: clojure -M -e "(require 'konserve-dynamodb.core)(println :loaded)"
+
+  # Compliance tests against a DynamoDB Local service container (reachable on
+  # localhost:8000, matching the test's endpoint). dummy AWS creds — DynamoDB Local
+  # ignores them but the SDK's default credentials chain requires them.
+  unittest:
+    docker:
+      - image: clojure:temurin-21-tools-deps
+        environment:
+          AWS_ACCESS_KEY_ID: dummy
+          AWS_SECRET_ACCESS_KEY: dummy
+          AWS_REGION: us-west-2
+      - image: amazon/dynamodb-local
+    steps:
+      - checkout
+      - run:
+          name: wait for DynamoDB Local on :8000
+          command: |
+            for i in $(seq 1 60); do (echo > /dev/tcp/localhost/8000) 2>/dev/null && exit 0; sleep 1; done
+            echo "DynamoDB Local did not come up on :8000"; exit 1
+      - run:
+          name: run compliance tests
+          command: |
+            clojure -M:test -e "(require '[clojure.test :as t] 'konserve-dynamodb.core-test)(let [{:keys [fail error]} (t/run-tests 'konserve-dynamodb.core-test)](when (or (pos? fail) (pos? error)) (System/exit 1)))"
+
 workflows:
   build-test-and-deploy:
     jobs:
@@ -18,10 +54,8 @@ workflows:
           context: docker-deploy
           requires:
             - tools/setup
-#      - tools/unittest:
-#          context: docker-deploy
-#          requires:
-#            - tools/build
+      - smoke
+      - unittest
       - tools/deploy:
           context:
             - clojars-deploy
@@ -32,7 +66,8 @@ workflows:
           requires:
             - tools/build
             - tools/format
-#            - tools/unittest
+            - smoke
+            - unittest
       - tools/release:
           context:
             - github-token
