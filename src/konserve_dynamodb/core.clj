@@ -2,6 +2,7 @@
   "DynamoDB based konserve backend."
   (:require
    [clojure.core.async :refer [<!!]]
+   [konserve.protocols :as protocols]
    [konserve.impl.defaults :refer [connect-default-store normalize-store-config]]
    [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
                                          PMultiWriteBackingStore PMultiReadBackingStore
@@ -41,6 +42,8 @@
     ProvisionedThroughput$Builder
     Put
     PutItemRequest
+    PutItemRequest$Builder
+    ConditionalCheckFailedException
     PutItemResponse
     ResourceNotFoundException
     ScalarAttributeType
@@ -207,6 +210,48 @@
   [^bytes b]
   (.build (.b (AttributeValue/builder) (SdkBytes/fromByteArray b))))
 
+(defn put-item-conditional
+  "PutItem only if the stored `Meta` attribute is still `expected-meta` — or, when
+   that is `::absent`, only if the item does not exist. True on success, false
+   when DynamoDB refuses.
+
+   DynamoDB evaluates the condition itself, atomically with the write, which is
+   what makes this backing's guarantee `:global`: it holds against every writer
+   anywhere, not merely those sharing a filesystem or a heap.
+
+   The condition compares the META attribute rather than a separate version
+   column. konserve's revision lives inside the serialized metadata, so the meta
+   bytes ARE the revision as far as this item is concerned — and comparing them
+   needs no schema change, no second attribute to keep in step, and no migration
+   for existing tables. Meta is small; the value is not compared and not sent.
+
+   Expression attribute NAMES for both `Key` and `Meta`: `KEY` is a DynamoDB
+   reserved word, and a literal in an expression would be rejected."
+  [^DynamoDbClient client ^String table-name ^HashMap item expected-meta]
+  (let [absent? (= ::absent expected-meta)
+        ^PutItemRequest$Builder builder (-> (PutItemRequest/builder)
+                                            (.tableName table-name)
+                                            (.item item)
+                                            (.expressionAttributeNames
+                                             (if absent?
+                                               (HashMap. {"#k" "Key"})
+                                               (HashMap. {"#m" "Meta"})))
+                                            (.conditionExpression
+                                             (if absent?
+                                               "attribute_not_exists(#k)"
+                                               "#m = :m")))
+        ^PutItemRequest request (-> (if absent?
+                                      builder
+                                      (.expressionAttributeValues
+                                       builder
+                                       (HashMap. {":m" (attribute-value-b expected-meta)})))
+                                    .build)]
+    (try
+      (.putItem client request)
+      true
+      (catch ConditionalCheckFailedException _
+        false))))
+
 (defrecord DynamoDBBlob
            [table ^String key data ^clojure.lang.Atom fetched-object]
 
@@ -215,14 +260,39 @@
   (-sync
     [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (let [{:keys [^bytes header ^bytes meta ^bytes value]} @data]
+                (go-try- (let [{:keys [^bytes header ^bytes meta ^bytes value]} @data
+                               expected-revision (:expected-revision env)
+                               item (hash-map "Key" (attribute-value-s key)
+                                              "Header" (attribute-value-b header)
+                                              "Meta" (attribute-value-b meta)
+                                              "Value" (attribute-value-b value))]
                            (if (and header meta value)
-                             (put-item (:client table)
-                                       (:table table)
-                                       (hash-map "Key" (attribute-value-s key)
-                                                 "Header" (attribute-value-b header)
-                                                 "Meta" (attribute-value-b meta)
-                                                 "Value" (attribute-value-b value)))
+                             (if expected-revision
+                               ;; FENCED. konserve has already compared the revision
+                               ;; it read against the caller's; the condition closes
+                               ;; the window BETWEEN that read and this write, which
+                               ;; is the half no counter can do. Both together are
+                               ;; the compare-and-set.
+                               ;;
+                               ;; What was read is remembered by `-read-header` and
+                               ;; looked up here, because `-sync` runs on a DIFFERENT
+                               ;; blob record than the read did — `update-blob`
+                               ;; creates its own. No entry means no read happened,
+                               ;; which for a fenced write is create-if-absent.
+                               (let [cache (:read-cache table)
+                                     expected (get @cache key ::absent)]
+                                 (try
+                                   (when-not (put-item-conditional (:client table) (:table table)
+                                                                   item expected)
+                                     (throw (ex-info (str "Conditional write rejected: the stored item is not "
+                                                          "the one this write was derived from.")
+                                                     {:type :konserve/revision-mismatch
+                                                      :key key
+                                                      :expected expected-revision})))
+                                   (finally
+                                     ;; Whatever happened, this read is spent.
+                                     (swap! cache dissoc key))))
+                               (put-item (:client table) (:table table) item))
                              (throw (ex-info "Updating a row is only possible if header, meta, and value are set."
                                              {:data @data})))
                            (reset! data {})))))
@@ -251,6 +321,13 @@
                    ;; read-first path converts it to the caller's :not-found.
                    (when (nil? attr-value)
                      (throw (store-key-not-found-ex key)))
+                   ;; Remember the META for a fenced `-sync`, and only for one. The
+                   ;; read preceding a conditional write carries `:expected-revision`
+                   ;; in its env, so we can tell — caching on every read would hold
+                   ;; metadata for every key a store ever touched.
+                   (when (:expected-revision env)
+                     (when-let [^AttributeValue m (get ^Map @fetched-object "Meta")]
+                       (swap! (:read-cache table) assoc key (.asByteArray ^SdkBytes (.b m)))))
                    (.asByteArray ^SdkBytes (.b attr-value))))))
 
   (-read-meta
@@ -311,7 +388,17 @@
     (if (:sync? env) nil (go-try- nil))))
 
 (defrecord DynamoDBStore
-           [^DynamoDbClient client ^String table ^java.lang.Boolean consistent-read?]
+           [^DynamoDbClient client ^String table ^java.lang.Boolean consistent-read? read-cache]
+
+  ;; DynamoDB evaluates the condition — see `put-item-conditional` — so konserve
+  ;; adds no mechanism of its own: no sidecar blob, no lock it would take.
+  ;; Declared rather than inferred from the domain, since how far a guarantee
+  ;; reaches and who evaluates it are separate questions.
+  protocols/PSelfConditionalWrite
+
+  protocols/PConditionalWrite
+  ;; `:global`. The comparison happens inside DynamoDB, atomically with the write.
+  (-conditional-write-domain [_] :global)
 
   PBackingStore
 
@@ -539,7 +626,7 @@
         ^DynamoDbClient client (dynamodb-client dynamodb-spec)
         ^String table-name (:table dynamodb-spec)
         ^java.lang.Boolean consistent-read? (or (:consistent-read? dynamodb-spec) false)
-        backing (DynamoDBStore. client table-name consistent-read?)
+        backing (DynamoDBStore. client table-name consistent-read? (atom {}))
         config (merge {:opts               complete-opts
                        :config             {:sync-blob? true
                                             :in-place? true
@@ -573,7 +660,8 @@
   (let [complete-opts (merge {:sync? true} opts)
         backing (DynamoDBStore. (dynamodb-client dynamodb-spec)
                                 (:table dynamodb-spec)
-                                (or (:consistent-read? dynamodb-spec) false))]
+                                (or (:consistent-read? dynamodb-spec) false)
+                                (atom {}))]
     (-delete-store backing complete-opts)))
 
 (defn store-exists?
@@ -581,7 +669,8 @@
   (let [complete-opts (merge {:sync? true} opts)
         backing (DynamoDBStore. (dynamodb-client dynamodb-spec)
                                 (:table dynamodb-spec)
-                                (or (:consistent-read? dynamodb-spec) false))]
+                                (or (:consistent-read? dynamodb-spec) false)
+                                (atom {}))]
     (konserve.impl.storage-layout/-store-exists? backing complete-opts)))
 
 (defn release
