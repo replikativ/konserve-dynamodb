@@ -1,7 +1,7 @@
 # Batched writes and head-refresh startup
 
 Measured 2026-09-08: **144 successful samples**, using the same fixtures and
-three-repetition matrix as the [baseline](local-benchmark.md).
+three-repetition matrix as the [baseline](https://github.com/replikativ/konserve-dynamodb/blob/943d42827e23672a85e0e7b9b35b9da42ce80701/doc/local-benchmark.md).
 [Raw samples](benchmarks/local-2026-09-08-optimized.edn) retain SDK calls and bytes
 for every phase. This run uses batched fragment staging and `:startup-policy
 :heads` for tiered stores. The historical baseline uses serial staging and eager
@@ -39,6 +39,11 @@ committed heads. This refreshes on connect; it is not continuous synchronization
 or distributed writer fencing. See [configuration and limits](../README.md).
 
 ## Validation and limits
+
+The historical baseline and Datomic investigation are maintained separately in
+[research PR #8](https://github.com/replikativ/konserve-dynamodb/pull/8).
+The companion Datahike changes were uncommitted when measured; an exact Datahike
+revision is not yet available, so this is not a fully pinned reproduction.
 
 The combined suite passed **30 tests, 538 assertions, zero failures/errors**.
 Coverage includes partial fragment retries, retry exhaustion without publication,

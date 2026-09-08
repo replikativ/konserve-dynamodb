@@ -208,7 +208,8 @@ clojure -Sdeps '{:paths ["dev"]}' -M -m konserve-dynamodb.bench-report /tmp/kons
 ```
 
 See the [before/after results](doc/local-benchmark-optimized.md) and the
-[original baseline](doc/local-benchmark.md).
+[original baseline](https://github.com/replikativ/konserve-dynamodb/blob/943d42827e23672a85e0e7b9b35b9da42ce80701/doc/local-benchmark.md) in
+[research PR #8](https://github.com/replikativ/konserve-dynamodb/pull/8).
 
 ## Local testing
 
