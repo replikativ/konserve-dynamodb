@@ -130,3 +130,60 @@
         (is (satisfies? sl/PReadMissSafe (:backing st)))
         (dynamo/release st {:sync? true})
         (store/delete-store spec {:sync? true})))))
+
+(deftest dynamodb-compression-through-store-dispatch-test
+  (let [spec (assoc dynamodb-spec :backend :dynamodb
+                    :table "konserve-dynamodb-encoding-test")
+        compressed (assoc spec :config {:encoding {:compressor {:type :lz4}}})
+        value (apply str (repeat 20000 "compressible-value"))]
+    (try
+      (let [st (store/create-store compressed {:sync? true})]
+        (try
+          ;; Larger than a normal small item; confirm the public dispatch path
+          ;; actually installs compression, including in transactional writes.
+          (k/assoc-in st [:single] value {:sync? true})
+          (k/multi-assoc st {:multi value} {:sync? true})
+          (let [items (.items (dynamo/scan-table (:client (:backing st)) (:table spec)))
+                data-items (filter #(contains? % "Header") items)]
+            (is (seq data-items))
+            (is (every? #(pos? (aget (.asByteArray (.b (get % "Header"))) 2)) data-items)))
+          (finally (dynamo/release st {:sync? true}))))
+      ;; Reconnect also forwards the encoding settings for new writes.
+      (let [st (<!! (store/connect-store compressed {:sync? false}))]
+        (try
+          (is (= value (k/get st :single nil {:sync? true})))
+          (is (= value (k/get st :multi nil {:sync? true})))
+          (k/assoc-in st [:reconnected] value {:sync? true})
+          (let [items (.items (dynamo/scan-table (:client (:backing st)) (:table spec)))]
+            (is (every? #(pos? (aget (.asByteArray (.b (get % "Header"))) 2))
+                        (filter #(contains? % "Header") items))))
+          (finally (dynamo/release st {:sync? true}))))
+      ;; Reading compressed blobs must work without re-specifying compression.
+      (let [st (store/connect-store spec {:sync? true})]
+        (try
+          (is (= value (k/get st :reconnected nil {:sync? true})))
+          (finally (dynamo/release st {:sync? true}))))
+      (finally (store/delete-store spec {:sync? true})))))
+
+(deftest dynamodb-local-item-size-boundary-test
+  (let [spec (assoc dynamodb-spec :backend :dynamodb
+                    :table "konserve-dynamodb-size-test")
+        st (store/create-store spec {:sync? true})
+        client (:client (:backing st))
+        item (fn [n]
+               (java.util.HashMap.
+                {"Key" (-> (software.amazon.awssdk.services.dynamodb.model.AttributeValue/builder)
+                           (.s "size") .build)
+                 "Value" (-> (software.amazon.awssdk.services.dynamodb.model.AttributeValue/builder)
+                             (.b (software.amazon.awssdk.core.SdkBytes/fromByteArray (byte-array n)))
+                             .build)}))
+        ;; UTF-8 attribute names and key: 3 + 4 + 5 = 12 bytes.
+        max-value (- (* 400 1024) 12)]
+    (try
+      (is (some? (dynamo/put-item client (:table spec) (item max-value))))
+      (is (thrown-with-msg? software.amazon.awssdk.services.dynamodb.model.DynamoDbException
+                            #"(?i)size"
+                            (dynamo/put-item client (:table spec) (item (inc max-value)))))
+      (finally
+        (dynamo/release st {:sync? true})
+        (store/delete-store spec {:sync? true})))))

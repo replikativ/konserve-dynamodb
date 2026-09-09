@@ -3,6 +3,7 @@
   (:require
    [clojure.core.async :refer [<!!]]
    [konserve.protocols :as protocols]
+   [konserve-dynamodb.layout :as layout]
    [konserve.impl.defaults :refer [connect-default-store normalize-store-config]]
    [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
                                          PMultiWriteBackingStore PMultiReadBackingStore
@@ -15,6 +16,8 @@
   (:import
    (java.io ByteArrayInputStream)
    (java.net URI)
+   (java.nio ByteBuffer)
+   (java.security MessageDigest)
    (java.util HashMap Map ArrayList)
    (software.amazon.awssdk.auth.credentials AwsBasicCredentials StaticCredentialsProvider)
    (software.amazon.awssdk.core SdkBytes)
@@ -25,6 +28,9 @@
     AttributeValue
     BatchGetItemRequest
     BatchGetItemResponse
+    BatchWriteItemRequest
+    PutRequest
+    WriteRequest
     CreateTableRequest
     CreateTableRequest$Builder
     Delete
@@ -150,15 +156,14 @@
 
 (defn ^Map get-item
   [^DynamoDbClient client ^String table-name ^HashMap key ^java.lang.Boolean consistent-read?]
-  (try
-    (let [^GetItemRequest request (-> (GetItemRequest/builder)
-                                      (.tableName table-name)
-                                      (.key key)
-                                      (.consistentRead consistent-read?)
-                                      .build)]
-      (into {} (.item (.getItem client request))))
-    (catch Exception _
-      nil)))
+  ;; A missing item is an empty map. Service failures must reach the caller;
+  ;; treating throttling or authentication errors as absence can corrupt updates.
+  (let [^GetItemRequest request (-> (GetItemRequest/builder)
+                                    (.tableName table-name)
+                                    (.key key)
+                                    (.consistentRead consistent-read?)
+                                    .build)]
+    (into {} (.item (.getItem client request)))))
 
 (defn ^DeleteItemResponse delete-item
   [^DynamoDbClient client ^String table-name ^HashMap key]
@@ -169,38 +174,120 @@
     (.deleteItem client request)))
 
 (defn ^ScanResponse scan-table
-  [^DynamoDbClient client ^String table-name]
-  (let [^ScanRequest request (-> (ScanRequest/builder)
-                                 (.tableName table-name)
-                                 .build)]
-    (.scan client request)))
+  ([client table-name] (scan-table client table-name nil))
+  ([client table-name start-key] (scan-table client table-name start-key false))
+  ([^DynamoDbClient client ^String table-name start-key consistent-read?]
+   (let [request (-> (cond-> (-> (ScanRequest/builder) (.tableName table-name) (.consistentRead (boolean consistent-read?)))
+                       (seq start-key) (.exclusiveStartKey ^Map start-key))
+                     .build)]
+     (.scan client ^ScanRequest request))))
+
+(defn- batch-read-backoff!
+  [attempt]
+  ;; Full jitter, capped at one second; at most eight retries per batch.
+  (Thread/sleep (long (rand-int (inc (min 1000 (* 25 (bit-shift-left 1 attempt))))))))
 
 (defn ^BatchGetItemResponse batch-get-items
-  "Fetch multiple items in a single BatchGetItem call.
-   Returns a map of {store-key -> item-map} for found items.
-   Limited to 100 items per request by DynamoDB."
+  "Fetch up to 100 distinct keys, retrying partial responses with bounded backoff.
+   Returns an aggregated BatchGetItemResponse. Exhaustion throws rather than
+   presenting unprocessed keys as missing."
   [^DynamoDbClient client ^String table-name store-keys ^Boolean consistent-read?]
   (when (seq store-keys)
-    (let [;; Build list of keys to fetch
-          keys-list (java.util.ArrayList.)
-          _ (doseq [store-key store-keys]
-              (let [key-map (doto (java.util.HashMap.)
-                              (.put "Key" (.build (.s (AttributeValue/builder) store-key))))]
-                (.add keys-list key-map)))
-          ;; Build KeysAndAttributes with consistency setting
+    (let [keys-list (mapv (fn [store-key]
+                            {"Key" (.build (.s (AttributeValue/builder) store-key))})
+                          (distinct store-keys))
           ^KeysAndAttributes keys-and-attrs (-> (KeysAndAttributes/builder)
-                                                (.keys keys-list)
+                                                (.keys ^java.util.Collection keys-list)
                                                 (.consistentRead consistent-read?)
-                                                .build)
-          ;; Build request items map
-          request-items (doto (java.util.HashMap.)
-                          (.put table-name keys-and-attrs))
-          ;; Build and execute request
-          ^BatchGetItemRequest request (-> (BatchGetItemRequest/builder)
-                                           (.requestItems request-items)
-                                           .build)
-          ^BatchGetItemResponse response (.batchGetItem client request)]
-      response)))
+                                                .build)]
+      (loop [pending {table-name keys-and-attrs}
+             items []
+             attempt 0]
+        (let [request (-> (BatchGetItemRequest/builder)
+                          (.requestItems ^Map pending)
+                          .build)
+              ^BatchGetItemResponse response (.batchGetItem client ^BatchGetItemRequest request)
+              items (into items (get (.responses response) table-name))
+              remaining (.unprocessedKeys response)]
+          (if (empty? remaining)
+            (-> (BatchGetItemResponse/builder)
+                (.responses ^Map {table-name items})
+                .build)
+            (if (>= attempt 8)
+              (throw (ex-info "DynamoDB batch read retries exhausted"
+                              {:type :konserve.dynamodb/batch-read-incomplete
+                               :table table-name
+                               :attempts (inc attempt)
+                               :unprocessed-count (reduce + (map #(count (.keys ^KeysAndAttributes %))
+                                                                 (vals remaining)))}))
+              (do
+                (batch-read-backoff! attempt)
+                (recur remaining items (inc attempt))))))))))
+
+(defn batch-write-fragments!
+  "Stage at most 25 immutable 300 KiB fragments. Even with base64 and envelope
+   overhead this stays below BatchWriteItem's 16 MiB wire limit. Retry only
+   UnprocessedItems; callers must not publish manifests until this succeeds."
+  [^DynamoDbClient client table items]
+  (when (> (count items) 25)
+    (throw (ex-info "Fragment batch exceeds 25 items" {:type :konserve.dynamodb/invalid-fragment-batch})))
+  (when (seq items)
+    (let [requests (mapv (fn [item]
+                           (when-not (and (layout/fragment-key? (layout/string-of (get item "Key")))
+                                          (= #{"Key" "Fragment"} (set (keys item)))
+                                          (<= (alength ^bytes (layout/bytes-of (get item "Fragment"))) layout/fragment-size))
+                             (throw (ex-info "Invalid staged fragment" {:type :konserve.dynamodb/invalid-fragment-batch})))
+                           (let [^PutRequest put (-> (PutRequest/builder) (.item ^Map item) .build)]
+                             (-> (WriteRequest/builder) (.putRequest put) .build))) items)]
+      (loop [pending {table requests} attempt 0]
+        (let [request (-> (BatchWriteItemRequest/builder) (.requestItems ^Map pending) .build)
+              remaining (.unprocessedItems (.batchWriteItem client ^BatchWriteItemRequest request))]
+          (when (seq remaining)
+            (if (>= attempt 8)
+              (throw (ex-info "DynamoDB fragment write retries exhausted"
+                              {:type :konserve.dynamodb/batch-write-incomplete
+                               :table table :attempts (inc attempt)
+                               :unprocessed-count (reduce + (map count (vals remaining)))}))
+              (do
+                (batch-read-backoff! attempt)
+                (recur remaining (inc attempt))))))))))
+
+(defn- stage-fragments!
+  [client table plans]
+  ;; Fresh generation keys only; logical publication remains a separate atomic
+  ;; step after EVERY staging batch has completed successfully.
+  (doseq [items (partition-all 25 (mapcat :fragments plans))]
+    (batch-write-fragments! client table items)))
+
+(defn- hydrate-item
+  [client table item]
+  (if-let [{:keys [generation chunks length digest]} (layout/manifest item)]
+    (let [buf (ByteBuffer/allocate (int length))]
+      ;; Strong reads for freshly staged immutable fragments. Missing fragments
+      ;; are corruption/incomplete storage, never a missing logical key.
+      (doseq [indices (partition-all 16 (range chunks))]
+        (let [keys (mapv #(layout/fragment-key generation %) indices)
+              response (batch-get-items client table keys true)
+              found (into {} (map (fn [row] [(layout/string-of (get row "Key")) row]))
+                          (get (.responses ^BatchGetItemResponse response) table))]
+          (doseq [[i key] (map vector indices keys)]
+            (let [attr (get (get found key) "Fragment")
+                  bytes (when attr (layout/bytes-of attr))
+                  expected (min layout/fragment-size (- length (* i layout/fragment-size)))]
+              (when-not (and bytes (= expected (alength ^bytes bytes)))
+                (throw (ex-info "Missing or invalid DynamoDB blob fragment"
+                                {:type :konserve.dynamodb/incomplete-blob
+                                 :key (layout/string-of (get item "Key"))
+                                 :fragment key})))
+              (.put buf ^bytes bytes)))))
+      (let [payload (.array buf)]
+        (when-not (MessageDigest/isEqual ^bytes digest (layout/digest payload))
+          (throw (ex-info "DynamoDB blob checksum mismatch"
+                          {:type :konserve.dynamodb/corrupt-blob
+                           :key (layout/string-of (get item "Key"))})))
+        (assoc (merge {"Key" (get item "Key")} (layout/unpack payload))
+               ::condition-meta (get item "Meta"))))
+    item))
 
 (defn- attribute-value-s
   [^String s]
@@ -262,10 +349,9 @@
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (let [{:keys [^bytes header ^bytes meta ^bytes value]} @data
                                expected-revision (:expected-revision env)
-                               item (hash-map "Key" (attribute-value-s key)
-                                              "Header" (attribute-value-b header)
-                                              "Meta" (attribute-value-b meta)
-                                              "Value" (attribute-value-b value))]
+                               plan (when (and header meta value)
+                                      (layout/plan key @data layout/item-limit (true? (:overflow-write? table))))
+                               item (:item plan)]
                            (if (and header meta value)
                              (if expected-revision
                                ;; FENCED. konserve has already compared the revision
@@ -282,6 +368,7 @@
                                (let [cache (:read-cache table)
                                      expected (get @cache key ::absent)]
                                  (try
+                                   (stage-fragments! (:client table) (:table table) [plan])
                                    (when-not (put-item-conditional (:client table) (:table table)
                                                                    item expected)
                                      (throw (ex-info (str "Conditional write rejected: the stored item is not "
@@ -292,7 +379,9 @@
                                    (finally
                                      ;; Whatever happened, this read is spent.
                                      (swap! cache dissoc key))))
-                               (put-item (:client table) (:table table) item))
+                               (do
+                                 (stage-fragments! (:client table) (:table table) [plan])
+                                 (put-item (:client table) (:table table) item)))
                              (throw (ex-info "Updating a row is only possible if header, meta, and value are set."
                                              {:data @data})))
                            (reset! data {})))))
@@ -314,6 +403,8 @@
                                                     (:table table)
                                                     (hash-map "Key" (attribute-value-s key))
                                                     (:consistent-read? table))))
+                 (when (contains? @fetched-object "Format")
+                   (swap! fetched-object #(hydrate-item (:client table) (:table table) %)))
                  (let [^Map fetched-obj @fetched-object
                        ^AttributeValue attr-value (get fetched-obj "Header")]
                    ;; PReadMissSafe: an absent item is an empty map (GetItem returns
@@ -326,7 +417,8 @@
                    ;; in its env, so we can tell — caching on every read would hold
                    ;; metadata for every key a store ever touched.
                    (when (:expected-revision env)
-                     (when-let [^AttributeValue m (get ^Map @fetched-object "Meta")]
+                     (when-let [^AttributeValue m (or (get @fetched-object ::condition-meta)
+                                                      (get @fetched-object "Meta"))]
                        (swap! (:read-cache table) assoc key (.asByteArray ^SdkBytes (.b m)))))
                    (.asByteArray ^SdkBytes (.b attr-value))))))
 
@@ -476,17 +568,17 @@
     [_ env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
-                 (let [^ScanResponse response (scan-table client table)]
-                   (->> (.items response)
-                        (map (fn [^Map item]
-                               (let [^AttributeValue attr-value (.get item "Key")]
-                                 (.s attr-value))))
-                        doall)))))
+                 (loop [start nil result []]
+                   (let [response (scan-table client table start)
+                         keys (map #(layout/string-of (get % "Key")) (.items response))
+                         result (into result (remove layout/fragment-key? keys))
+                         next-key (.lastEvaluatedKey response)]
+                     (if (seq next-key) (recur next-key result) result))))))
 
   ;; Implementation for atomic multi-key writes
   PMultiWriteBackingStore
   (-multi-write-blobs
-    [_ store-key-values env]
+    [this store-key-values env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (if (> (count store-key-values) 100)
@@ -497,23 +589,21 @@
                                     :item-count (count store-key-values)}))
                    (try
             ;; Create a transact write items request with all our items
-                     (let [^ArrayList transact-items (ArrayList.)
-                           _ (doseq [[store-key data] store-key-values]
-                               (let [{:keys [header meta value]} data
-                            ;; Create a map with the item data
-                                     item-map (doto (HashMap.)
-                                                (.put "Key" (attribute-value-s store-key))
-                                                (.put "Header" (attribute-value-b header))
-                                                (.put "Meta" (attribute-value-b meta))
-                                                (.put "Value" (attribute-value-b value)))
-                            ;; Create a Put request for this item
-                                     ^Put put (.build (.item (.tableName (Put/builder) table) item-map))
-                            ;; Create a TransactWriteItem with the Put request
-                                     ^TransactWriteItem transact-write-item (.build (.put (TransactWriteItem/builder) put))]
-                        ;; Add to our list of TransactWriteItems
-                                 (.add transact-items transact-write-item)))
-                  ;; Execute the transaction
-                           _ (transact-write-items client transact-items)
+                     (let [;; Per-item budgets keep the complete publication under 4 MiB.
+                           ;; Large payloads are staged outside this transaction; every
+                           ;; logical key still changes atomically in the single request.
+                           budget (min layout/item-limit
+                                       (quot layout/transaction-limit (max 1 (count store-key-values))))
+                           plans (mapv (fn [[key data]] (layout/plan key data budget (true? (:overflow-write? this)))) store-key-values)
+                           _ (stage-fragments! client table plans)
+                           ^ArrayList transact-items (ArrayList.)
+                           _ (doseq [{:keys [item]} plans]
+                               (let [^Put request (-> (Put/builder) (.tableName table) (.item ^Map item) .build)]
+                                 (.add transact-items
+                                       (-> (TransactWriteItem/builder)
+                                           (.put request)
+                                           .build))))
+                           _ (when (seq plans) (transact-write-items client transact-items))
                   ;; If we get here, all writes succeeded
                   ;; Create a result map with all keys mapping to true
                            results (into {} (map (fn [[store-key _]] [store-key true]) store-key-values))]
@@ -522,9 +612,9 @@
                      (catch Exception e
                        (log/warn :konserve.dynamodb/transact-write-failed {:message (.getMessage e)})
                        (throw (ex-info "DynamoDB TransactWriteItems failed"
-                                       {:type :not-supported
-                                        :reason "Transaction failed"
-                                        :cause e}))))))))
+                                       {:type :konserve.dynamodb/transaction-failed
+                                        :reason "Transaction failed"}
+                                       e))))))))
 
   (-multi-delete-blobs
     [_ store-keys env]
@@ -572,9 +662,9 @@
                        (catch Exception e
                          (log/warn :konserve.dynamodb/transact-delete-failed {:message (.getMessage e)})
                          (throw (ex-info "DynamoDB TransactWriteItems (delete) failed"
-                                         {:type :not-supported
-                                          :reason "Transaction failed"
-                                          :cause e})))))))))
+                                         {:type :konserve.dynamodb/transaction-failed
+                                          :reason "Transaction failed"}
+                                         e)))))))))
 
   PMultiReadBackingStore
   (-multi-read-blobs
@@ -608,9 +698,9 @@
                        (catch Exception e
                          (log/warn :konserve.dynamodb/batch-get-failed {:message (.getMessage e)})
                          (throw (ex-info "DynamoDB BatchGetItem failed"
-                                         {:type :not-supported
-                                          :reason "Batch read failed"
-                                          :cause e}))))))))))
+                                         (merge {:type :konserve.dynamodb/batch-read-failed}
+                                                (ex-data e))
+                                         e))))))))))
 
 ;; DynamoDB reads are read-miss-safe: -create-blob only constructs a DynamoDBBlob
 ;; (no side effect), and -read-header throws store-key-not-found-ex when GetItem
@@ -622,11 +712,16 @@
 (defn connect-store
   [dynamodb-spec & {:keys [opts]
                     :as params}]
-  (let [complete-opts (merge {:sync? true :read-capacity 5 :write-capacity 5} opts)
+  (let [overflow-write? (get dynamodb-spec :overflow-write? false)
+        _ (when-not (boolean? overflow-write?)
+            (throw (ex-info ":overflow-write? must be boolean" {:overflow-write? overflow-write?})))
+        complete-opts (merge {:sync? true :read-capacity 5 :write-capacity 5} opts)
         ^DynamoDbClient client (dynamodb-client dynamodb-spec)
         ^String table-name (:table dynamodb-spec)
         ^java.lang.Boolean consistent-read? (or (:consistent-read? dynamodb-spec) false)
-        backing (DynamoDBStore. client table-name consistent-read? (atom {}))
+        backing (assoc (DynamoDBStore. client table-name consistent-read? (atom {}))
+                       :konserve/max-multi-write-items 100
+                       :overflow-write? overflow-write?)
         config (merge {:opts               complete-opts
                        :config             {:sync-blob? true
                                             :in-place? true
@@ -731,11 +826,11 @@
   (async+sync (:sync? opts) *default-sync-translation*
               (go-try-
                (let [dynamodb-spec (dissoc config :backend)
-                     exists (store-exists? dynamodb-spec)]
+                     exists (store-exists? dynamodb-spec :opts opts)]
                  (when-not (if (:sync? opts) exists (<!! exists))
                    (throw (ex-info (str "DynamoDB table does not exist: " table)
                                    {:table table :region region :config config})))
-                 (connect-store dynamodb-spec)))))
+                 (connect-store dynamodb-spec :opts (assoc opts :sync? true) :config (:config config))))))
 
 (defmethod store/-create-store :dynamodb
   [{:keys [region table read-capacity write-capacity] :as config} opts]
@@ -750,7 +845,7 @@
                  ;; Create the table
                  (create-dynamodb-table client table {:read-capacity (or read-capacity 5)
                                                       :write-capacity (or write-capacity 5)})
-                 (connect-store dynamodb-spec)))))
+                 (connect-store dynamodb-spec :opts (assoc opts :sync? true) :config (:config config))))))
 
 (defmethod store/-store-exists? :dynamodb
   [{:keys [region table] :as config} opts]

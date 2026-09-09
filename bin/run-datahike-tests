@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+clojure -M:datahike-test -e '
+(require (quote clojure.test))
+(let [names (quote [konserve-dynamodb.unit-test
+                   konserve-dynamodb.core-test
+                   konserve-dynamodb.overflow-test
+                   konserve-dynamodb.maintenance-test
+                   konserve-dynamodb.datahike-test
+                   konserve-dynamodb.startup-test])]
+  (doseq [n names] (require n))
+  (let [result (apply clojure.test/run-tests names)]
+    (System/exit (+ (:fail result) (:error result)))))'

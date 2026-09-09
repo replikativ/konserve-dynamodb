@@ -13,7 +13,18 @@
                                                         :exclusions  [software.amazon.awssdk/netty-nio-client
                                                                       software.amazon.awssdk/apache-client]}
         com.amazonaws/aws-xray-recorder-sdk-aws-sdk-v2 {:mvn/version "2.14.0"}}
- :aliases {:dev    {:extra-paths ["test"]}
+ :aliases {:bench-local {:extra-paths ["dev"]
+                         :extra-deps {org.replikativ/datahike {:local/root "../datahike"}
+                                      org.replikativ/konserve-lmdb {:local/root "../konserve-lmdb"}
+                                      org.replikativ/datahike-lmdb {:local/root "../datahike-lmdb"}}
+                         :jvm-opts ["--enable-native-access=ALL-UNNAMED" "-Xmx3g"]
+                         :main-opts ["-m" "konserve-dynamodb.local-bench"]}
+           :datahike-test {:extra-paths ["test" "test-datahike"]
+                           :extra-deps {org.replikativ/datahike {:local/root "../datahike"}
+                                        org.replikativ/konserve-lmdb {:local/root "../konserve-lmdb"}
+                                        org.replikativ/datahike-lmdb {:local/root "../datahike-lmdb"}}
+                           :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}
+           :dev    {:extra-paths ["test"]}
            :test   {:extra-deps  {lambdaisland/kaocha {:mvn/version "1.60.977"}}
                     :extra-paths ["test"]
                     #_#_:main-opts ["-m" "kaocha.runner"]}
